@@ -8,20 +8,21 @@
 
 #include "util.h"
 
-#define CONNECT_TIMEOUT 5
+#define CONNECT_TIMEOUT 1
+#define RETRANSMIT_TIMEOUT 1
 
-#define NUM_STATE   3
+#define NUM_STATE   4
 #define NUM_EVENT   8
 
 enum pakcet_type { F_CON = 0, F_FIN = 1, F_ACK = 2, F_DATA = 3 };   // Packet Type
-enum proto_state { wait_CON = 0, CON_sent = 1, CONNECTED = 2 };     // States
+enum proto_state { wait_CON = 0, CON_sent = 1, CONNECTED = 2, SENDING_DATA = 3 };     // States
 
 // Events
 enum proto_event { RCV_CON = 0, RCV_FIN = 1, RCV_ACK = 2, RCV_DATA = 3,
                    CONNECT = 4, CLOSE = 5,   SEND = 6,    TIMEOUT = 7 };
 
 char *pkt_name[] = { "F_CON", "F_FIN", "F_ACK", "F_DATA" };
-char *st_name[] =  { "wait_CON", "CON_sent", "CONNECTED" };
+char *st_name[] =  { "wait_CON", "CON_sent", "CONNECTED", "SENDING_DATA" };
 char *ev_name[] =  { "RCV_CON", "RCV_FIN", "RCV_ACK", "RCV_DATA",
                      "CONNECT", "CLOSE",   "SEND",    "TIMEOUT"   };
 
@@ -113,12 +114,36 @@ static void send_data(void *p)
     printf("Send Data to peer '%s' size:%d\n",
         ((struct p_event*)p)->packet.data, ((struct p_event*)p)->size);
     send_packet(F_DATA, (struct p_event *)p, ((struct p_event *)p)->size);
+	set_timer(RETRANSMIT_TIMEOUT);
 }
 
+char priv_data[MAX_DATA_SIZE] = ""; 
 static void report_data(void *p)
 {
+	send_packet(F_ACK, NULL, 0);
+	if(!strcmp(((struct p_event*)p)->packet.data, priv_data))
+		return;
+
+	strcpy(priv_data, ((struct p_event*)p)->packet.data);
+
     printf("Data Arrived data='%s' size:%d\n",
         ((struct p_event*)p)->packet.data, ((struct p_event*)p)->packet.size);
+
+	set_timer(0);
+}
+
+int retransmit_count = 0;
+static void retransmit_data(void *p)
+{
+	printf("retransmit count : %d\n", ++retransmit_count);
+    send_packet(F_DATA, (struct p_event *)p, ((struct p_event *)p)->size);
+	set_timer(RETRANSMIT_TIMEOUT);
+}
+
+static void finish_send_data(void *p)
+{
+	set_timer(0);
+	retransmit_count = 0;
 }
 
 struct state_action p_FSM[NUM_STATE][NUM_EVENT] = {
@@ -136,7 +161,11 @@ struct state_action p_FSM[NUM_STATE][NUM_EVENT] = {
 
   // - CONNECTED state
   {{ NULL, CONNECTED },        { close_con, wait_CON }, { NULL,      CONNECTED },      { report_data, CONNECTED },
-   { NULL, CONNECTED },        { close_con, wait_CON }, { send_data, CONNECTED },      { NULL,        CONNECTED }},
+   { NULL, CONNECTED },        { close_con, wait_CON }, { send_data, SENDING_DATA },   { retransmit_data,  SENDING_DATA }},
+
+  // - SENDING_DATA state
+  {{ NULL, SENDING_DATA },     { close_con, wait_CON }, { finish_send_data, CONNECTED }, { report_data, SENDING_DATA },
+   { NULL, SENDING_DATA },     { close_con, wait_CON }, { NULL, SENDING_DATA },     { retransmit_data, SENDING_DATA }},
 };
 
 int data_count = 0;
